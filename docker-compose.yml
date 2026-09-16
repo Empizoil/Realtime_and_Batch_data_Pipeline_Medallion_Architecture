@@ -1,0 +1,264 @@
+services:
+
+  # ============================================================
+  # CLICKHOUSE
+  # ============================================================
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.3
+    env_file:
+      - .env
+
+    environment:
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--spider",
+          "-q",
+          "http://localhost:8123/ping"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+    restart: unless-stopped
+
+    networks:
+      - medallion
+
+
+  # ============================================================
+  # APACHE NIFI
+  # ============================================================
+  nifi:
+    image: apache/nifi:2.11.0
+    env_file:
+      - .env
+
+    environment:
+      NIFI_WEB_HTTPS_HOST: "0.0.0.0"
+      NIFI_WEB_HTTPS_PORT: 8443
+      SINGLE_USER_CREDENTIALS_USERNAME: ${NIFI_USERNAME}
+      SINGLE_USER_CREDENTIALS_PASSWORD: ${NIFI_PASSWORD}
+
+    ports:
+      - "8443:8443"
+
+    volumes:
+      - nifi_data:/opt/nifi/nifi-current/data
+      - ./nifi/templates:/opt/nifi/nifi-current/conf/templates:ro
+
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "curl",
+          "--fail",
+          "--silent",
+          "-k",
+          "https://localhost:8443/nifi/"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+    restart: unless-stopped
+
+    networks:
+      - medallion
+
+
+  # ============================================================
+  # POSTGRESQL - AIRFLOW METADATA DATABASE
+  # ============================================================
+  postgres:
+    image: postgres:16
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+    restart: unless-stopped
+
+    networks:
+      - medallion
+
+
+  # ============================================================
+  # AIRFLOW INIT
+  # ============================================================
+  airflow-init:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+
+    env_file:
+      - .env
+
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_DATABASE_URL}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/plugins:/opt/airflow/plugins
+      - ./dbt:/opt/airflow/dbt
+      - airflow_logs:/opt/airflow/logs
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    entrypoint: /bin/bash
+
+    command:
+      - -c
+      - |
+        airflow db migrate &&
+        airflow users create \
+          --username "${AIRFLOW_ADMIN_USERNAME}" \
+          --password "${AIRFLOW_ADMIN_PASSWORD}" \
+          --firstname "${AIRFLOW_ADMIN_FIRSTNAME}" \
+          --lastname "${AIRFLOW_ADMIN_LASTNAME}" \
+          --role Admin \
+          --email "${AIRFLOW_ADMIN_EMAIL}"
+
+    restart: "no"
+
+    networks:
+      - medallion
+
+
+  # ============================================================
+  # AIRFLOW WEBSERVER
+  # ============================================================
+  airflow-webserver:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+
+    env_file:
+      - .env
+
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_DATABASE_URL}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/plugins:/opt/airflow/plugins
+      - ./dbt:/opt/airflow/dbt
+      - airflow_logs:/opt/airflow/logs
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    command: webserver
+
+    ports:
+      - "8080:8080"
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "curl",
+          "--fail",
+          "http://localhost:8080/health"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+    restart: unless-stopped
+
+    networks:
+      - medallion
+
+
+  # ============================================================
+  # AIRFLOW SCHEDULER
+  # ============================================================
+  airflow-scheduler:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+
+    env_file:
+      - .env
+
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_DATABASE_URL}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/plugins:/opt/airflow/plugins
+      - ./dbt:/opt/airflow/dbt
+      - airflow_logs:/opt/airflow/logs
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    command: scheduler
+
+    restart: unless-stopped
+
+    networks:
+      - medallion
+
+
+# ==============================================================
+# NETWORKS
+# ==============================================================
+networks:
+  medallion:
+    driver: bridge
+
+
+# ==============================================================
+# PERSISTENT STORAGE
+# ==============================================================
+volumes:
+  clickhouse_data:
+  nifi_data:
+  postgres_data:
+  airflow_logs: 
